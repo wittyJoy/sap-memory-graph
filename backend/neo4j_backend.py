@@ -1,27 +1,54 @@
 """
-Neo4j 知识图谱记忆后端
-Knowledge Graph Memory Backend using Neo4j
+Neo4j 知识图谱记忆后端 (GRAG 架构)
+基于 NagaAgent 五元组模式改造
+
+五元组结构：(主体, 主体类型, 谓词, 客体, 客体类型)
+双重存储：Neo4j + 本地 JSON 备份
 """
 import json
-import time
-from datetime import datetime
+import hashlib
+import asyncio
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable, AuthError
 
 
+# ======================== 实体类型定义 ========================
+ENTITY_TYPES = {
+    "person", "location", "organization", "item",
+    "concept", "time", "event", "activity"
+}
+
+
 class MemoryGraph:
-    """Neo4j 知识图谱记忆管理器"""
+    """Neo4j 知识图谱记忆管理器（GRAG 五元组架构）"""
 
     def __init__(self, uri: str = "bolt://localhost:7687",
                  user: str = "neo4j", password: str = "memory123",
-                 database: str = "neo4j"):
+                 database: str = "neo4j",
+                 local_backup_dir: str = "logs/knowledge_graph"):
         self.uri = uri
         self.user = user
         self.password = password
         self.database = database
         self.driver = None
+
+        # 本地 JSON 备份路径
+        self.backup_dir = Path(local_backup_dir)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        self.quintuples_file = self.backup_dir / "quintuples.json"
+        self._local_quintuples = self._load_local_quintuples()
+
+        # SHA-256 去重集合
+        self._processed_hashes: set = set()
+
+        # 异步任务队列
+        self._task_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        self._workers_started = False
+
         self._connect()
 
     def _connect(self):
@@ -43,27 +70,25 @@ class MemoryGraph:
         if not self.driver:
             return
         with self.driver.session(database=self.database) as session:
-            # 为实体创建唯一性约束
-            for label in ["Person", "Place", "Object", "Event", "Concept", "Topic"]:
+            for label in ["person", "location", "organization", "item",
+                          "concept", "time", "event", "activity"]:
                 try:
                     session.run(
                         f"CREATE CONSTRAINT IF NOT EXISTS "
                         f"FOR (n:{label}) REQUIRE n.name IS UNIQUE"
                     )
                 except Exception:
-                    pass  # 约束已存在则忽略
-
-            # 为 Memory 节点创建索引
+                    pass
             try:
                 session.run(
                     "CREATE INDEX IF NOT EXISTS "
-                    "FOR (m:Memory) ON (m.created_at)"
+                    "FOR (q:Quintuple) ON (q.hash)"
                 )
             except Exception:
                 pass
 
     def is_connected(self) -> bool:
-        """检查连接状态"""
+        """检查 Neo4j 驱动是否可用"""
         if not self.driver:
             return False
         try:
@@ -72,269 +97,278 @@ class MemoryGraph:
         except Exception:
             return False
 
-    # ======================== 实体管理 ========================
+    # ======================== 本地备份 ========================
 
-    def upsert_entity(self, name: str, entity_type: str,
-                      properties: dict = None) -> bool:
-        """创建或更新实体节点"""
-        if not self.driver:
-            return False
-        props = properties or {}
-        props["name"] = name
-        props["updated_at"] = datetime.now().isoformat()
-        # 清理类型名，防止注入
-        safe_type = "".join(c for c in entity_type if c.isalnum() or c == "_")
-        if not safe_type:
-            safe_type = "Concept"
+    def _load_local_quintuples(self) -> list:
+        """从本地 JSON 加载历史五元组"""
+        if self.quintuples_file.exists():
+            try:
+                return json.loads(
+                    self.quintuples_file.read_text(encoding="utf-8")
+                )
+            except Exception:
+                return []
+        return []
 
-        with self.driver.session(database=self.database) as session:
-            session.run(
-                f"MERGE (e:{safe_type} {{name: $name}}) SET e += $props",
-                name=name, props=props
+    def _save_local_quintuples(self):
+        """保存五元组到本地 JSON"""
+        try:
+            self.quintuples_file.write_text(
+                json.dumps(self._local_quintuples, ensure_ascii=False, indent=2),
+                encoding="utf-8"
             )
-        return True
+        except Exception as e:
+            print(f"[MemoryGraph] 本地备份保存失败: {e}")
 
-    def upsert_relation(self, source: str, target: str,
-                        relation: str, properties: dict = None) -> bool:
-        """创建或更新两个实体之间的关系"""
-        if not self.driver:
-            return False
-        props = properties or {}
-        props["created_at"] = datetime.now().isoformat()
-        safe_rel = "".join(c for c in relation if c.isalnum() or c == "_")
-        if not safe_rel:
-            safe_rel = "RELATED_TO"
+    # ======================== SHA-256 去重 ========================
 
-        with self.driver.session(database=self.database) as session:
-            session.run(
-                f"""
-                MATCH (a {{name: $source}})
-                MATCH (b {{name: $target}})
-                MERGE (a)-[r:{safe_rel}]->(b)
-                SET r += $props
-                """,
-                source=source, target=target, props=props
-            )
-        return True
+    @staticmethod
+    def _compute_hash(text: str) -> str:
+        """计算文本的 SHA-256 哈希"""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    # ======================== 记忆存储 ========================
+    def is_duplicate(self, text: str) -> bool:
+        """检查文本是否已处理过"""
+        h = self._compute_hash(text)
+        if h in self._processed_hashes:
+            return True
+        self._processed_hashes.add(h)
+        return False
 
-    def add_memory(self, content: str, entities: list = None,
-                   relations: list = None, memory_type: str = "episodic",
-                   importance: float = 0.5, source: str = "conversation",
-                   tags: list = None) -> Optional[int]:
+    # ======================== 五元组存储 ========================
+
+    def store_quintuples(self, quintuples: list, source_text: str = "") -> list:
         """
-        添加一条记忆到知识图谱
+        存储五元组到 Neo4j + 本地 JSON
 
         Args:
-            content: 记忆内容摘要
-            entities: [{"name": "小夜", "type": "Person"}, ...]
-            relations: [{"source": "小夜", "target": "猫", "type": "likes"}, ...]
-            memory_type: episodic(事件) / semantic(知识) / emotional(情感)
-            importance: 0.0~1.0 重要程度
-            source: 来源标识
-            tags: 标签列表
+            quintuples: [{
+                "subject": "小夜",
+                "subject_type": "person",
+                "predicate": "喜欢",
+                "object": "猫",
+                "object_type": "item"
+            }, ...]
+            source_text: 原始对话文本（用于去重）
 
         Returns:
-            记忆节点 ID 或 None
+            存储成功的五元组 ID 列表
         """
-        if not self.driver:
-            return None
-
-        entities = entities or []
-        relations = relations or []
-        tags = tags or []
-
-        with self.driver.session(database=self.database) as session:
-            # 1. 创建记忆节点
-            result = session.run(
-                """
-                CREATE (m:Memory {
-                    content: $content,
-                    type: $type,
-                    importance: $importance,
-                    source: $source,
-                    tags: $tags,
-                    created_at: $created_at,
-                    access_count: 0,
-                    last_accessed: $created_at
-                })
-                RETURN id(m) AS mid
-                """,
-                content=content, type=memory_type,
-                importance=importance, source=source,
-                tags=tags,
-                created_at=datetime.now().isoformat()
-            )
-            mid = result.single()["mid"]
-
-            # 2. 创建/关联实体
-            for ent in entities:
-                ent_name = ent.get("name", "").strip()
-                ent_type = ent.get("type", "Concept").strip()
-                if not ent_name:
-                    continue
-                safe_type = "".join(c for c in ent_type if c.isalnum() or c == "_") or "Concept"
-                session.run(
-                    f"""
-                    MERGE (e:{safe_type} {{name: $name}})
-                    WITH e
-                    MATCH (m:Memory) WHERE id(m) = $mid
-                    MERGE (m)-[:MENTIONS]->(e)
-                    """,
-                    name=ent_name, mid=mid
-                )
-
-            # 3. 创建实体间关系
-            for rel in relations:
-                src = rel.get("source", "").strip()
-                tgt = rel.get("target", "").strip()
-                rtype = rel.get("type", "RELATED_TO").strip()
-                if not src or not tgt:
-                    continue
-                safe_rel = "".join(c for c in rtype if c.isalnum() or c == "_") or "RELATED_TO"
-                session.run(
-                    f"""
-                    MATCH (a {{name: $src}})
-                    MATCH (b {{name: $tgt}})
-                    MERGE (a)-[r:{safe_rel}]->(b)
-                    """,
-                    src=src, tgt=tgt
-                )
-
-            return mid
-
-    # ======================== 记忆召回 ========================
-
-    def recall_by_entities(self, entities: list, limit: int = 10) -> list:
-        """根据实体名召回相关记忆"""
-        if not self.driver or not entities:
+        if not quintuples:
             return []
+
+        # SHA-256 去重：同一段对话文本不重复提取
+        if source_text and self.is_duplicate(source_text):
+            print("[MemoryGraph] ⏭️ 重复文本，跳过")
+            return []
+
+        stored_ids = []
+
+        for q in quintuples:
+            subj = q.get("subject", "").strip()
+            subj_type = q.get("subject_type", "concept").strip().lower()
+            predicate = q.get("predicate", "").strip()
+            obj = q.get("object", "").strip()
+            obj_type = q.get("object_type", "concept").strip().lower()
+
+            if not subj or not obj or not predicate:
+                continue
+
+            # 校验类型
+            if subj_type not in ENTITY_TYPES:
+                subj_type = "concept"
+            if obj_type not in ENTITY_TYPES:
+                obj_type = "concept"
+
+            # 计算五元组哈希（去重）
+            q_hash = self._compute_hash(
+                f"{subj}|{subj_type}|{predicate}|{obj}|{obj_type}"
+            )
+
+            now = datetime.now().isoformat()
+
+            # 1. 存入 Neo4j：实体 MERGE + QUINTUPLE 关系 MERGE（谓词存于关系属性）
+            if self.driver:
+                try:
+                    with self.driver.session(database=self.database) as session:
+                        result = session.run(
+                            f"""
+                            MERGE (a:{subj_type} {{name: $subj}})
+                            MERGE (b:{obj_type} {{name: $obj}})
+                            MERGE (a)-[r:QUINTUPLE {{
+                                predicate: $predicate,
+                                hash: $q_hash
+                            }}]->(b)
+                            SET r.created_at = $now,
+                                r.source = $source,
+                                r.access_count = coalesce(r.access_count, 0)
+                            RETURN id(r) AS rid
+                            """,
+                            subj=subj, obj=obj, predicate=predicate,
+                            q_hash=q_hash, now=now, source="conversation"
+                        )
+                        rid = result.single()["rid"]
+                        stored_ids.append(rid)
+                except Exception as e:
+                    print(f"[MemoryGraph] Neo4j 存储失败: {e}")
+
+            # 2. 存入本地 JSON 备份（Neo4j 不可用时仍可恢复）
+            entry = {
+                "subject": subj,
+                "subject_type": subj_type,
+                "predicate": predicate,
+                "object": obj,
+                "object_type": obj_type,
+                "hash": q_hash,
+                "created_at": now,
+                "source": "conversation"
+            }
+            # 检查本地是否已存在
+            existing_hashes = {q.get("hash") for q in self._local_quintuples}
+            if q_hash not in existing_hashes:
+                self._local_quintuples.append(entry)
+
+        # 持久化本地备份
+        self._save_local_quintuples()
+
+        return stored_ids
+
+    # ======================== RAG 检索 ========================
+
+    def rag_retrieve(self, keywords: list, limit: int = 10) -> str:
+        """
+        基于关键词的 RAG 检索，返回格式化的记忆文本
+
+        流程：关键词提取 → Cypher 查询 → 格式化注入上下文
+
+        Args:
+            keywords: 从用户消息中提取的关键词列表
+            limit: 最大返回条数
+
+        Returns:
+            格式化的记忆文本，如：
+            "小夜(person) —[喜欢]→ 猫(item)\n用户(person) —[住在]→ 北京(location)"
+        """
+        if not self.driver or not keywords:
+            return ""
+
         with self.driver.session(database=self.database) as session:
             result = session.run(
                 """
-                MATCH (m:Memory)-[:MENTIONS]->(e)
-                WHERE e.name IN $entities
-                WITH m, COUNT(DISTINCT e) AS relevance
-                ORDER BY relevance DESC, m.importance DESC, m.created_at DESC
+                MATCH (a)-[r:QUINTUPLE]->(b)
+                WHERE a.name IN $keywords OR b.name IN $keywords
+                WITH a, r, b,
+                     CASE WHEN a.name IN $keywords THEN 2 ELSE 1 END +
+                     CASE WHEN b.name IN $keywords THEN 2 ELSE 1 END AS score
+                ORDER BY score DESC, r.access_count DESC
                 LIMIT $limit
-                SET m.access_count = m.access_count + 1,
-                    m.last_accessed = $now
-                RETURN id(m) AS id, m.content AS content, m.type AS type,
-                       m.importance AS importance, m.created_at AS created_at,
-                       m.tags AS tags, relevance
+                SET r.access_count = coalesce(r.access_count, 0) + 1
+                RETURN labels(a)[0] AS a_type, a.name AS a_name,
+                       r.predicate AS predicate,
+                       labels(b)[0] AS b_type, b.name AS b_name
                 """,
-                entities=entities, limit=limit,
-                now=datetime.now().isoformat()
+                keywords=keywords, limit=limit
             )
-            return [dict(record) for record in result]
+            # 召回时递增 access_count，供 recall_important 排序使用
 
-    def recall_recent(self, limit: int = 20, memory_type: str = None) -> list:
-        """召回最近的记忆"""
-        if not self.driver:
-            return []
-        with self.driver.session(database=self.database) as session:
-            if memory_type:
-                result = session.run(
-                    """
-                    MATCH (m:Memory)
-                    WHERE m.type = $type
-                    RETURN id(m) AS id, m.content AS content, m.type AS type,
-                           m.importance AS importance, m.created_at AS created_at,
-                           m.tags AS tags
-                    ORDER BY m.created_at DESC
-                    LIMIT $limit
-                    """,
-                    type=memory_type, limit=limit
+            lines = []
+            for record in result:
+                a_type = record["a_type"] or "concept"
+                a_name = record["a_name"]
+                pred = record["predicate"]
+                b_type = record["b_type"] or "concept"
+                b_name = record["b_name"]
+                lines.append(
+                    f"{a_name}({a_type}) —[{pred}]→ {b_name}({b_type})"
                 )
-            else:
-                result = session.run(
-                    """
-                    MATCH (m:Memory)
-                    RETURN id(m) AS id, m.content AS content, m.type AS type,
-                           m.importance AS importance, m.created_at AS created_at,
-                           m.tags AS tags
-                    ORDER BY m.created_at DESC
-                    LIMIT $limit
-                    """,
-                    limit=limit
-                )
-            return [dict(record) for record in result]
 
-    def recall_important(self, limit: int = 10) -> list:
-        """召回最重要的记忆"""
+            return "\n".join(lines)
+
+    def recall_recent(self, limit: int = 20) -> list:
+        """召回最近的五元组"""
         if not self.driver:
             return []
         with self.driver.session(database=self.database) as session:
             result = session.run(
                 """
-                MATCH (m:Memory)
-                WHERE m.importance >= 0.7
-                RETURN id(m) AS id, m.content AS content, m.type AS type,
-                       m.importance AS importance, m.created_at AS created_at,
-                       m.tags AS tags
-                ORDER BY m.importance DESC, m.access_count DESC
+                MATCH (a)-[r:QUINTUPLE]->(b)
+                RETURN labels(a)[0] AS a_type, a.name AS a_name,
+                       r.predicate AS predicate,
+                       labels(b)[0] AS b_type, b.name AS b_name,
+                       r.created_at AS created_at
+                ORDER BY r.created_at DESC
                 LIMIT $limit
                 """,
                 limit=limit
             )
             return [dict(record) for record in result]
 
-    # ======================== 图谱数据 ========================
+    def recall_important(self, limit: int = 10) -> list:
+        """召回访问次数最多的五元组（最常被引用）"""
+        if not self.driver:
+            return []
+        with self.driver.session(database=self.database) as session:
+            result = session.run(
+                """
+                MATCH (a)-[r:QUINTUPLE]->(b)
+                WHERE coalesce(r.access_count, 0) > 0
+                RETURN labels(a)[0] AS a_type, a.name AS a_name,
+                       r.predicate AS predicate,
+                       labels(b)[0] AS b_type, b.name AS b_name,
+                       r.access_count AS access_count,
+                       r.created_at AS created_at
+                ORDER BY r.access_count DESC
+                LIMIT $limit
+                """,
+                limit=limit
+            )
+            return [dict(record) for record in result]
 
-    def get_graph_data(self, node_limit: int = 300,
-                       edge_limit: int = 500) -> dict:
-        """获取用于 3D 可视化的图数据"""
+    # ======================== 图谱数据（3D 可视化）========================
+
+    def get_graph_data(self, node_limit: int = 100,
+                       edge_limit: int = 200) -> dict:
+        """
+        获取用于 3D 可视化的图数据
+
+        映射规则：
+        - subject/object → 节点
+        - predicate → 有向边
+        - 度中心性 → 节点高度权重
+        """
         if not self.driver:
             return {"nodes": [], "edges": []}
 
         with self.driver.session(database=self.database) as session:
-            # 节点：实体 + 高重要性记忆
+            # 获取节点及其度中心性
             nodes_result = session.run(
                 """
-                // 实体节点
-                MATCH (e)
-                WHERE NOT e:Memory AND NOT e:_BoltType
-                WITH collect({
-                    id: toString(id(e)),
-                    name: coalesce(e.name, 'unknown'),
-                    labels: labels(e),
-                    type: 'entity',
-                    importance: 0.5
-                }) AS entities
-
-                // 记忆节点（只取重要的）
-                OPTIONAL MATCH (m:Memory)
-                WHERE m.importance >= 0.4 OR m.access_count > 0
-                WITH entities, collect({
-                    id: toString(id(m)),
-                    name: substring(m.content, 0, 30),
-                    labels: ['Memory'],
-                    type: 'memory',
-                    importance: m.importance,
-                    content: m.content,
-                    mem_type: m.type,
-                    created_at: m.created_at
-                })[0..$mlimit] AS memories
-
-                RETURN entities + memories AS nodes
+                MATCH (n)
+                WHERE NOT n:_BoltType
+                  AND any(label IN labels(n) WHERE label IN $entity_types)
+                WITH n, size([(n)--() | 1]) AS degree
+                ORDER BY degree DESC
+                LIMIT $limit
+                RETURN toString(id(n)) AS id,
+                       n.name AS name,
+                       labels(n)[0] AS label,
+                       degree
                 """,
-                mlimit=node_limit // 2
+                entity_types=list(ENTITY_TYPES),
+                limit=node_limit
             )
-            nodes = nodes_result.single()["nodes"] if nodes_result.peek() else []
+            nodes = [dict(record) for record in nodes_result]
 
-            # 边
+            # 获取边
             edges_result = session.run(
                 """
-                MATCH (a)-[r]->(b)
-                WHERE NOT a:_BoltType AND NOT b:_BoltType
-                WITH a, b, type(r) AS rtype, r
-                LIMIT $elimit
+                MATCH (a)-[r:QUINTUPLE]->(b)
                 RETURN toString(id(a)) AS source,
                        toString(id(b)) AS target,
-                       rtype AS type
+                       r.predicate AS predicate
+                LIMIT $limit
                 """,
-                elimit=edge_limit
+                limit=edge_limit
             )
             edges = [dict(record) for record in edges_result]
 
@@ -351,80 +385,138 @@ class MemoryGraph:
                 MATCH path = (center {{name: $name}})-[*1..{depth}]-(neighbor)
                 WITH nodes(path) AS ns, relationships(path) AS rs
                 UNWIND ns AS n
-                WITH DISTINCT n, rs
+                WITH DISTINCT n
+                WHERE NOT n:_BoltType
                 RETURN collect(DISTINCT {{
                     id: toString(id(n)),
-                    name: coalesce(n.name, substring(n.content, 0, 20)),
-                    labels: labels(n),
-                    importance: coalesce(n.importance, 0.5)
-                }}) AS nodes,
-                [] AS edges
+                    name: n.name,
+                    label: labels(n)[0]
+                }}) AS nodes
                 """,
                 name=entity_name
             )
             data = result.single()
-            return {"nodes": data["nodes"], "edges": data["edges"]}
+            return {"nodes": data["nodes"], "edges": []}
 
     # ======================== 统计 ========================
 
     def get_stats(self) -> dict:
-        """获取图谱统计信息"""
+        """返回图谱统计：五元组总数、实体数、累计召回次数、本地备份数"""
         if not self.driver:
-            return {"connected": False}
+            return {"connected": False, "local_count": len(self._local_quintuples)}
         with self.driver.session(database=self.database) as session:
             result = session.run("""
-                MATCH (m:Memory)
-                WITH count(m) AS total_memories,
-                     avg(m.importance) AS avg_importance,
-                     max(m.created_at) AS latest_memory,
-                     sum(m.access_count) AS total_access
-                OPTIONAL MATCH (e)
-                WHERE NOT e:Memory AND NOT e:_BoltType
-                WITH total_memories, avg_importance, latest_memory,
-                     total_access, count(e) AS total_entities
-                OPTIONAL MATCH ()-[r]->()
-                RETURN total_memories, total_entities,
-                       count(r) AS total_relations,
-                       avg_importance, latest_memory, total_access
-            """)
+                MATCH ()-[r:QUINTUPLE]->()
+                WITH count(r) AS total_quintuples,
+                     sum(coalesce(r.access_count, 0)) AS total_access
+                MATCH (n)
+                WHERE NOT n:_BoltType
+                  AND any(label IN labels(n) WHERE label IN $entity_types)
+                RETURN total_quintuples, count(n) AS total_entities, total_access
+            """, entity_types=list(ENTITY_TYPES))
             record = result.single()
             return {
                 "connected": True,
-                "total_memories": record["total_memories"],
+                "total_quintuples": record["total_quintuples"],
                 "total_entities": record["total_entities"],
-                "total_relations": record["total_relations"],
-                "avg_importance": round(record["avg_importance"] or 0, 2),
-                "latest_memory": record["latest_memory"],
-                "total_access": record["total_access"]
+                "total_access": record["total_access"],
+                "local_backup_count": len(self._local_quintuples)
             }
+
+    # ======================== 异步任务管理器 ========================
+
+    async def start_workers(self, num_workers: int = 3):
+        """启动异步 worker 消费记忆提取任务"""
+        if self._workers_started:
+            return
+        self._workers_started = True
+        for i in range(num_workers):
+            asyncio.create_task(self._worker(f"worker-{i}"))
+        print(f"[MemoryGraph] ⚙️ {num_workers} 个 worker 已启动")
+
+    async def _worker(self, name: str):
+        """异步 worker：从队列中消费任务"""
+        while True:
+            try:
+                task = await self._task_queue.get()
+                if task is None:  # 停止信号
+                    break
+                await self._process_task(task, name)
+                self._task_queue.task_done()
+            except Exception as e:
+                print(f"[{name}] 任务处理异常: {e}")
+
+    async def _process_task(self, task: dict, worker_name: str):
+        """处理单个记忆提取任务"""
+        text = task.get("text", "")
+        extractor = task.get("extractor")
+        if not text or not extractor:
+            return
+
+        try:
+            # 在线程池中运行同步的 LLM 调用
+            loop = asyncio.get_event_loop()
+            quintuples = await loop.run_in_executor(
+                None, extractor.extract_quintuples, text
+            )
+            if quintuples:
+                self.store_quintuples(quintuples, source_text=text)
+                print(f"[{worker_name}] ✅ 存储 {len(quintuples)} 个五元组")
+        except Exception as e:
+            print(f"[{worker_name}] 提取失败: {e}")
+
+    async def enqueue_task(self, text: str, extractor):
+        """将记忆提取任务加入队列"""
+        if self._task_queue.full():
+            print("[MemoryGraph] ⚠️ 任务队列已满，丢弃")
+            return False
+        await self._task_queue.put({"text": text, "extractor": extractor})
+        return True
 
     # ======================== 清理 ========================
 
-    def forget_old_memories(self, days: int = 90,
-                            min_importance: float = 0.3) -> int:
-        """清理低重要性的旧记忆"""
+    def forget_old_quintuples(self, days: int = 90, min_access: int = 0) -> int:
+        """
+        删除超过指定天数且从未被 RAG 召回的五元组关系
+
+        按 access_count 判断价值，删除长期未被 RAG 召回的关系。
+        孤立实体节点（无任何关系）会在关系删除后一并清除。
+        """
         if not self.driver:
             return 0
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         with self.driver.session(database=self.database) as session:
             result = session.run(
                 """
-                MATCH (m:Memory)
-                WHERE m.importance < $min_imp
-                  AND m.created_at < $cutoff
-                  AND m.access_count = 0
-                DETACH DELETE m
-                RETURN count(m) AS deleted
+                MATCH ()-[r:QUINTUPLE]->()
+                WHERE coalesce(r.access_count, 0) <= $min_access
+                  AND r.created_at < $cutoff
+                DELETE r
+                RETURN count(r) AS deleted
                 """,
-                min_imp=min_importance,
-                cutoff=(datetime.now().replace(
-                    day=datetime.now().day - days
-                ) if datetime.now().day > days else
-                    datetime.now()).isoformat()
+                min_access=min_access,
+                cutoff=cutoff,
             )
-            return result.single()["deleted"]
+            deleted = result.single()["deleted"]
+            # 清理无关系的孤立实体节点
+            session.run(
+                """
+                MATCH (n)
+                WHERE NOT n:_BoltType
+                  AND any(label IN labels(n) WHERE label IN $entity_types)
+                  AND NOT (n)--()
+                DELETE n
+                """,
+                entity_types=list(ENTITY_TYPES),
+            )
+            return deleted
+
+    async def cleanup_old_tasks(self, hours: int = 24):
+        """定期清理（预留接口，后续可清理队列或本地备份）"""
+        pass
 
     def close(self):
-        """关闭连接"""
+        """关闭 Neo4j 驱动连接"""
         if self.driver:
             self.driver.close()
             self.driver = None
