@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🧠 记忆云海 | Memory Cloud</title>
+<style>
+:root{
+  --bg:#0a0a1a;--panel:#111127;--border:#1a1a3a;
+  --text:#e0e0f0;--dim:#6a6a8a;--accent:#00ffcc;
+  --pink:#ff6b9d;--gold:#ffd93d;--blue:#4d96ff;
+  --green:#6bcb77;--purple:#9b59b6;--radius:12px;
+}
+*{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',system-ui,sans-serif;}
+body{background:var(--bg);color:var(--text);overflow:hidden;height:100vh;}
+
+/* ---- 布局 ---- */
+.app{display:flex;height:100vh;}
+.sidebar{width:320px;background:var(--panel);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;}
+.main{flex:1;position:relative;}
+
+/* ---- 侧栏 ---- */
+.sidebar header{padding:16px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:10px;}
+.sidebar header h1{font-size:16px;font-weight:600;}
+.sidebar header .icon{font-size:22px;}
+
+.stats{padding:16px 20px;display:grid;grid-template-columns:1fr 1fr;gap:10px;
+  border-bottom:1px solid var(--border);}
+.stat-card{background:rgba(255,255,255,.03);border-radius:8px;padding:10px 12px;text-align:center;}
+.stat-val{font-size:22px;font-weight:700;color:var(--accent);}
+.stat-label{font-size:11px;color:var(--dim);margin-top:2px;}
+
+.search-box{padding:12px 16px;border-bottom:1px solid var(--border);}
+.search-box input{width:100%;background:#1a1a30;border:1px solid var(--border);
+  border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;}
+.search-box input:focus{border-color:var(--accent);}
+
+.memories{flex:1;overflow-y:auto;padding:8px;}
+.memories::-webkit-scrollbar{width:4px;}
+.memories::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
+.memory-card{background:rgba(255,255,255,.03);border:1px solid var(--border);
+  border-radius:10px;padding:12px 14px;margin-bottom:8px;cursor:pointer;
+  transition:all .2s;}
+.memory-card:hover{border-color:var(--accent);background:rgba(0,255,204,.04);}
+.memory-card.active{border-color:var(--accent);box-shadow:0 0 12px rgba(0,255,204,.15);}
+.memory-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+.memory-type{font-size:10px;padding:2px 8px;border-radius:10px;text-transform:uppercase;
+  font-weight:600;letter-spacing:.5px;}
+.type-episodic{background:rgba(0,255,204,.15);color:var(--accent);}
+.type-semantic{background:rgba(77,150,255,.15);color:var(--blue);}
+.type-emotional{background:rgba(255,107,157,.15);color:var(--pink);}
+.memory-time{font-size:11px;color:var(--dim);}
+.memory-content{font-size:13px;line-height:1.6;color:var(--text);}
+.memory-entities{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;}
+.entity-tag{font-size:10px;padding:2px 6px;border-radius:4px;
+  background:rgba(255,217,61,.1);color:var(--gold);}
+.memory-importance{display:flex;align-items:center;gap:4px;margin-top:6px;}
+.importance-bar{flex:1;height:3px;background:rgba(255,255,255,.1);border-radius:2px;overflow:hidden;}
+.importance-fill{height:100%;border-radius:2px;transition:width .3s;}
+.importance-label{font-size:10px;color:var(--dim);}
+
+/* ---- 控制栏 ---- */
+.controls{padding:12px 16px;border-top:1px solid var(--border);
+  display:flex;gap:8px;}
+.btn{flex:1;padding:8px;border:1px solid var(--border);border-radius:8px;
+  background:transparent;color:var(--text);font-size:12px;cursor:pointer;
+  transition:all .2s;display:flex;align-items:center;justify-content:center;gap:4px;}
+.btn:hover{border-color:var(--accent);color:var(--accent);}
+.btn.primary{background:rgba(0,255,204,.1);border-color:var(--accent);color:var(--accent);}
+
+/* ---- 图谱区域 ---- */
+#graph-canvas{width:100%;height:100%;}
+
+/* ---- 提示浮窗 ---- */
+.tooltip{position:fixed;background:rgba(10,10,30,.95);border:1px solid var(--accent);
+  border-radius:10px;padding:14px 18px;max-width:320px;pointer-events:none;
+  z-index:1000;backdrop-filter:blur(10px);display:none;}
+.tooltip h3{font-size:14px;margin-bottom:6px;color:var(--accent);}
+.tooltip p{font-size:12px;line-height:1.5;color:var(--text);}
+.tooltip .meta{font-size:10px;color:var(--dim);margin-top:8px;}
+
+/* ---- 搜索结果高亮 ---- */
+.highlight-node{animation:pulse 1.5s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.5;}}
+
+/* ---- 图例 ---- */
+.legend{position:absolute;bottom:16px;left:16px;background:rgba(10,10,30,.85);
+  border:1px solid var(--border);border-radius:10px;padding:12px 16px;
+  backdrop-filter:blur(8px);font-size:11px;}
+.legend-item{display:flex;align-items:center;gap:8px;margin:4px 0;}
+.legend-dot{width:10px;height:10px;border-radius:50%;}
+
+/* ---- 状态栏 ---- */
+.status-bar{position:absolute;top:16px;right:16px;background:rgba(10,10,30,.85);
+  border:1px solid var(--border);border-radius:10px;padding:10px 16px;
+  backdrop-filter:blur(8px);font-size:12px;display:flex;align-items:center;gap:8px;}
+.status-dot{width:8px;height:8px;border-radius:50%;}
+.status-dot.online{background:var(--green);box-shadow:0 0 6px var(--green);}
+.status-dot.offline{background:#ff4444;box-shadow:0 0 6px #ff4444;}
+
+/* ---- 添加记忆面板 ---- */
+.add-panel{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  background:var(--panel);border:1px solid var(--accent);border-radius:16px;
+  padding:24px;width:400px;display:none;z-index:100;
+  box-shadow:0 20px 60px rgba(0,0,0,.5);}
+.add-panel h2{font-size:16px;margin-bottom:16px;}
+.add-panel textarea{width:100%;height:80px;background:#1a1a30;border:1px solid var(--border);
+  border-radius:8px;padding:10px;color:var(--text);font-size:13px;resize:none;outline:none;}
+.add-panel textarea:focus{border-color:var(--accent);}
+.add-panel .row{display:flex;gap:8px;margin-top:12px;}
+.add-panel label{font-size:12px;color:var(--dim);display:block;margin-top:10px;}
+.add-panel select,.add-panel input[type=range]{width:100%;background:#1a1a30;
+  border:1px solid var(--border);border-radius:6px;padding:6px;color:var(--text);font-size:12px;}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;display:none;}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- 侧栏 -->
+  <div class="sidebar">
+    <header>
+      <span class="icon">🧠</span>
+      <h1>记忆云海</h1>
+    </header>
+    <div class="stats" id="stats">
+      <div class="stat-card"><div class="stat-val" id="s-memories">-</div><div class="stat-label">记忆</div></div>
+      <div class="stat-card"><div class="stat-val" id="s-entities">-</div><div class="stat-label">实体</div></div>
+      <div class="stat-card"><div class="stat-val" id="s-relations">-</div><div class="stat-label">关系</div></div>
+      <div class="stat-card"><div class="stat-val" id="s-access">-</div><div class="stat-label">召回次数</div></div>
+    </div>
+    <div class="search-box">
+      <input type="text" id="search" placeholder="🔍 搜索实体或记忆..."/>
+    </div>
+    <div class="memories" id="memory-list"></div>
+    <div class="controls">
+      <button class="btn primary" id="btn-add">➕ 添加记忆</button>
+      <button class="btn" id="btn-refresh">🔄 刷新</button>
+      <button class="btn" id="btn-reset">🎯 复位</button>
+    </div>
+  </div>
+
+  <!-- 图谱主区域 -->
+  <div class="main">
+    <canvas id="graph-canvas"></canvas>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background:#00ffcc"></div>人物 Person</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ff6b9d"></div>地点 Place</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ffd93d"></div>物品 Object</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#6bcb77"></div>事件 Event</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#4d96ff"></div>概念 Concept</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#9b59b6"></div>记忆 Memory</div>
+    </div>
+    <div class="status-bar">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">连接中...</span>
+    </div>
+  </div>
+</div>
+
+<!-- 浮窗 -->
+<div class="tooltip" id="tooltip"></div>
+
+<!-- 添加记忆面板 -->
+<div class="overlay" id="overlay"></div>
+<div class="add-panel" id="add-panel">
+  <h2>➕ 添加记忆</h2>
+  <textarea id="add-content" placeholder="记忆内容..."></textarea>
+  <label>类型</label>
+  <select id="add-type">
+    <option value="episodic">📌 事件记忆</option>
+    <option value="semantic">📚 知识记忆</option>
+    <option value="emotional">💖 情感记忆</option>
+  </select>
+  <label>重要性: <span id="add-imp-val">0.5</span></label>
+  <input type="range" id="add-importance" min="0" max="1" step="0.1" value="0.5"/>
+  <div class="row">
+    <button class="btn primary" id="add-confirm">确认</button>
+    <button class="btn" id="add-cancel">取消</button>
+  </div>
+</div>
+
+<script>
+// ======================== 配置 ========================
+const API_BASE = location.protocol + '//' + location.host;
+const WS_URL = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/memory';
+
+// ======================== Canvas 3D 力导向图 ========================
+class ForceGraph3D {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.nodes = [];
+    this.edges = [];
+    this.nodeMap = {};
+    this.camera = { x: 0, y: 0, z: 800, rotX: 0.3, rotY: 0 };
+    this.drag = { active: false, x: 0, y: 0 };
+    this.hover = null;
+    this.selected = null;
+    this.time = 0;
+    this.resize();
+    this.bindEvents();
+    this.animate();
+  }
+
+  resize() {
+    const rect = this.canvas.parentElement.getBoundingClientRect();
+    this.canvas.width = rect.width * devicePixelRatio;
+    this.canvas.height = rect.height * devicePixelRatio;
+    this.canvas.style.width = rect.width + 'px';
+    this.canvas.style.height = rect.height + 'px';
+    this.ctx.scale(devicePixelRatio, devicePixelRatio);
+    this.w = rect.width;
+    this.h = rect.height;
+  }
+
+  bindEvents() {
+    window.addEventListener('resize', () => this.resize());
+    this.canvas.addEventListener('mousedown', e => {
+      this.drag = { active: true, x: e.clientX, y: e.clientY };
+    });
+    window.addEventListener('mousemove', e => {
+      if (this.drag.active) {
+        this.camera.rotY += (e.clientX - this.drag.x) * 0.005;
+        this.camera.rotX += (e.clientY - this.drag.y) * 0.005;
+        this.camera.rotX = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.camera.rotX));
+        this.drag.x = e.clientX;
+        this.drag.y = e.clientY;
+      } else {
+        this.checkHover(e.clientX, e.clientY);
+      }
+    });
+    window.addEventListener('mouseup', () => this.drag.active = false);
+    this.canvas.addEventListener('wheel', e => {
+      this.camera.z *= e.deltaY > 0 ? 1.1 : 0.9;
+      this.camera.z = Math.max(100, Math.min(3000, this.camera.z));
+      e.preventDefault();
+    }, { passive: false });
+    this.canvas.addEventListener('click', e => this.handleClick(e));
+  }
+
+  project(x, y, z) {
+    // 旋转
+    const cosX = Math.cos(this.camera.rotX), sinX = Math.sin(this.camera.rotX);
+    const cosY = Math.cos(this.camera.rotY), sinY = Math.sin(this.camera.rotY);
+    let ry = y * cosX - z * sinX;
+    let rz = y * sinX + z * cosX;
+    let rx = x * cosY + rz * sinY;
+    rz = -x * sinY + rz * cosY;
+    // 透视
+    const scale = this.camera.z / (this.camera.z + rz);
+    return {
+      x: this.w / 2 + rx * scale,
+      y: this.h / 2 + ry * scale,
+      scale: scale,
+      z: rz
+    };
+  }
+
+  checkHover(mx, my) {
+    this.hover = null;
+    let minDist = 20;
+    for (const n of this.nodes) {
+      const p = this.project(n.x, n.y, n.z);
+      const dx = mx - p.x, dy = my - p.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const r = (n.importance || 0.5) * 15 * p.scale + 5;
+      if (d < r && d < minDist) {
+        minDist = d;
+        this.hover = n;
+      }
+    }
+    this.canvas.style.cursor = this.hover ? 'pointer' : 'grab';
+    // 更新浮窗
+    const tip = document.getElementById('tooltip');
+    if (this.hover) {
+      const p = this.project(this.hover.x, this.hover.y, this.hover.z);
+      tip.style.display = 'block';
+      tip.style.left = (p.x + 15) + 'px';
+      tip.style.top = (p.y - 10) + 'px';
+      const h = this.hover;
+      tip.innerHTML = `<h3>${h.name || '未知'}</h3>
+        <p>${h.labels?.join(', ') || ''}</p>
+        ${h.content ? `<p style="margin-top:6px;">${h.content}</p>` : ''}
+        ${h.importance != null ? `<div class="meta">重要性: ${(h.importance*100).toFixed(0)}%</div>` : ''}`;
+    } else {
+      tip.style.display = 'none';
+    }
+  }
+
+  handleClick(e) {
+    if (this.hover) {
+      this.selected = this.hover;
+      // 触发自定义事件
+      this.canvas.dispatchEvent(new CustomEvent('nodeclick', { detail: this.hover }));
+    } else {
+      this.selected = null;
+    }
+  }
+
+  setData(data) {
+    this.nodes = (data.nodes || []).map((n, i) => ({
+      ...n,
+      x: n.x || (Math.random() - 0.5) * 400,
+      y: n.y || (Math.random() - 0.5) * 400,
+      z: n.z || (Math.random() - 0.5) * 400,
+      vx: 0, vy: 0, vz: 0
+    }));
+    this.nodeMap = {};
+    this.nodes.forEach(n => this.nodeMap[n.id] = n);
+    this.edges = (data.edges || []).map(e => ({
+      source: this.nodeMap[e.source],
+      target: this.nodeMap[e.target],
+      type: e.type
+    })).filter(e => e.source && e.target);
+  }
+
+  simulate() {
+    const alpha = 0.3;
+    // 排斥力
+    for (let i = 0; i < this.nodes.length; i++) {
+      for (let j = i + 1; j < this.nodes.length; j++) {
+        const a = this.nodes[i], b = this.nodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        let d2 = dx*dx + dy*dy + dz*dz + 1;
+        let f = 800 / d2;
+        a.vx += dx * f; a.vy += dy * f; a.vz += dz * f;
+        b.vx -= dx * f; b.vy -= dy * f; b.vz -= dz * f;
+      }
+    }
+    // 弹簧力
+    for (const e of this.edges) {
+      const dx = e.target.x - e.source.x;
+      const dy = e.target.y - e.source.y;
+      const dz = e.target.z - e.source.z;
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.1;
+      const f = (d - 120) * 0.01;
+      e.source.vx += dx/d * f; e.source.vy += dy/d * f; e.source.vz += dz/d * f;
+      e.target.vx -= dx/d * f; e.target.vy -= dy/d * f; e.target.vz -= dz/d * f;
+    }
+    // 中心引力
+    for (const n of this.nodes) {
+      n.vx -= n.x * 0.001;
+      n.vy -= n.y * 0.001;
+      n.vz -= n.z * 0.001;
+      // 阻尼
+      n.vx *= 0.9; n.vy *= 0.9; n.vz *= 0.9;
+      n.x += n.vx * alpha; n.y += n.vy * alpha; n.z += n.vz * alpha;
+    }
+  }
+
+  animate() {
+    this.time += 0.016;
+    this.simulate();
+
+    const ctx = this.ctx;
+    ctx.clearRect(0, 0, this.w, this.h);
+
+    // 深空背景
+    const grad = ctx.createRadialGradient(this.w/2, this.h/2, 0, this.w/2, this.h/2, this.w/2);
+    grad.addColorStop(0, '#0d0d24');
+    grad.addColorStop(1, '#050510');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, this.w, this.h);
+
+    // 星星
+    for (let i = 0; i < 80; i++) {
+      const sx = (Math.sin(i * 127.1 + this.time * 0.1) * 0.5 + 0.5) * this.w;
+      const sy = (Math.cos(i * 311.7 + this.time * 0.08) * 0.5 + 0.5) * this.h;
+      const brightness = (Math.sin(this.time * 2 + i) * 0.3 + 0.5);
+      ctx.fillStyle = `rgba(200,200,255,${brightness * 0.3})`;
+      ctx.fillRect(sx, sy, 1.5, 1.5);
+    }
+
+    // 边（连线）
+    ctx.lineWidth = 0.8;
+    for (const e of this.edges) {
+      const sp = this.project(e.source.x, e.source.y, e.source.z);
+      const tp = this.project(e.target.x, e.target.y, e.target.z);
+      const alpha = Math.min(sp.scale, tp.scale) * 0.3;
+      ctx.strokeStyle = `rgba(100,200,255,${alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(sp.x, sp.y);
+      ctx.lineTo(tp.x, tp.y);
+      ctx.stroke();
+
+      // 流动粒子
+      const t = (this.time * 0.5 + e.source.x * 0.01) % 1;
+      const px = sp.x + (tp.x - sp.x) * t;
+      const py = sp.y + (tp.y - sp.y) * t;
+      ctx.fillStyle = `rgba(0,255,204,${alpha * 1.5})`;
+      ctx.beginPath();
+      ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 节点
+    const colors = {
+      'Person': '#00ffcc', 'Place': '#ff6b9d', 'Object': '#ffd93d',
+      'Event': '#6bcb77', 'Concept': '#4d96ff', 'Topic': '#4d96ff',
+      'Emotion': '#ff6b9d', 'Memory': '#9b59b6'
+    };
+
+    for (const n of this.nodes) {
+      const p = this.project(n.x, n.y, n.z);
+      const imp = n.importance || 0.5;
+      const baseR = imp * 12 * p.scale + 3;
+      const color = colors[n.labels?.[0]] || '#ffffff';
+      const isSelected = this.selected?.id === n.id;
+      const isHover = this.hover?.id === n.id;
+
+      // 外发光
+      if (imp > 0.6 || isSelected || isHover) {
+        const glowR = baseR * (isSelected ? 3 : 2);
+        const glow = ctx.createRadialGradient(p.x, p.y, baseR, p.x, p.y, glowR);
+        glow.addColorStop(0, color + '40');
+        glow.addColorStop(1, color + '00');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // 脉动效果（高重要性）
+      const pulse = imp > 0.7 ? Math.sin(this.time * 3 + n.x) * 0.2 + 1 : 1;
+      const r = baseR * pulse;
+
+      // 节点本体
+      ctx.fillStyle = color;
+      ctx.globalAlpha = p.scale * 0.9;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 内核高光
+      ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = p.scale * 0.5;
+      ctx.beginPath();
+      ctx.arc(p.x - r * 0.25, p.y - r * 0.25, r * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 1;
+
+      // 标签（近处才显示）
+      if (p.scale > 0.4 && r > 5) {
+        ctx.fillStyle = `rgba(255,255,255,${p.scale * 0.8})`;
+        ctx.font = `${Math.max(9, 12 * p.scale)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText(n.name || '', p.x, p.y + r + 14 * p.scale);
+      }
+    }
+
+    requestAnimationFrame(() => this.animate());
+  }
+}
+
+// ======================== 应用逻辑 ========================
+const canvas = document.getElementById('graph-canvas');
+const graph = new ForceGraph3D(canvas);
+let ws = null;
+let connected = false;
+
+// API 调用
+async function api(path, opts = {}) {
+  const res = await fetch(API_BASE + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  });
+  return res.json();
+}
+
+// 加载图谱数据
+async function loadGraph() {
+  try {
+    const data = await api('/api/memory/graph-data');
+    graph.setData(data);
+    updateStatus(true);
+  } catch (e) {
+    console.error('加载图谱失败:', e);
+    updateStatus(false);
+  }
+}
+
+// 加载统计
+async function loadStats() {
+  try {
+    const s = await api('/api/memory/stats');
+    document.getElementById('s-memories').textContent = s.total_memories || 0;
+    document.getElementById('s-entities').textContent = s.total_entities || 0;
+    document.getElementById('s-relations').textContent = s.total_relations || 0;
+    document.getElementById('s-access').textContent = s.total_access || 0;
+    updateStatus(s.connected);
+  } catch (e) {
+    updateStatus(false);
+  }
+}
+
+// 加载记忆列表
+async function loadMemories() {
+  try {
+    const list = await api('/api/memory/recent?limit=50');
+    renderMemoryList(list);
+  } catch (e) {
+    console.error('加载记忆列表失败:', e);
+  }
+}
+
+function renderMemoryList(memories) {
+  const container = document.getElementById('memory-list');
+  if (!memories.length) {
+    container.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim)">暂无记忆</div>';
+    return;
+  }
+  container.innerHTML = memories.map(m => {
+    const typeClass = `type-${m.type || 'episodic'}`;
+    const typeLabel = { episodic: '事件', semantic: '知识', emotional: '情感' }[m.type] || '记忆';
+    const typeIcon = { episodic: '📌', semantic: '📚', emotional: '💖' }[m.type] || '📝';
+    const impColor = m.importance > 0.7 ? '#ff6b9d' : m.importance > 0.4 ? '#ffd93d' : '#4d96ff';
+    const time = m.created_at ? new Date(m.created_at).toLocaleString('zh-CN', { hour12: false }) : '';
+    return `
+    <div class="memory-card" data-id="${m.id}" onclick="focusMemory('${m.id}')">
+      <div class="memory-header">
+        <span class="memory-type ${typeClass}">${typeIcon} ${typeLabel}</span>
+        <span class="memory-time">${time}</span>
+      </div>
+      <div class="memory-content">${m.content || ''}</div>
+      ${m.tags?.length ? `<div class="memory-entities">${m.tags.map(t=>`<span class="entity-tag">#${t}</span>`).join('')}</div>` : ''}
+      <div class="memory-importance">
+        <div class="importance-bar"><div class="importance-fill" style="width:${(m.importance||0.5)*100}%;background:${impColor}"></div></div>
+        <span class="importance-label">${((m.importance||0.5)*100).toFixed(0)}%</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function focusMemory(id) {
+  const node = graph.nodes.find(n => n.id === String(id));
+  if (node) {
+    graph.selected = node;
+    // 移动视角
+    graph.camera.x = -node.x * 0.3;
+    graph.camera.y = -node.y * 0.3;
+  }
+}
+
+function updateStatus(ok) {
+  connected = ok;
+  document.getElementById('status-dot').className = 'status-dot ' + (ok ? 'online' : 'offline');
+  document.getElementById('status-text').textContent = ok ? '已连接' : '连接断开';
+}
+
+// WebSocket 实时更新
+function connectWS() {
+  try {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => {
+      console.log('[WS] 已连接');
+      ws.send(JSON.stringify({ type: 'get_graph_data' }));
+    };
+    ws.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        if (d.type === 'graph_data' || d.type === 'graph_update') {
+          graph.setData(d.data);
+        } else if (d.type === 'stats') {
+          // 更新统计
+        }
+      } catch {}
+    };
+    ws.onclose = () => setTimeout(connectWS, 5000);
+  } catch {
+    setTimeout(connectWS, 5000);
+  }
+}
+
+// 搜索
+document.getElementById('search').addEventListener('input', (e) => {
+  const q = e.target.value.toLowerCase();
+  if (!q) {
+    graph.nodes.forEach(n => n._dim = false);
+    return;
+  }
+  graph.nodes.forEach(n => {
+    const match = (n.name || '').toLowerCase().includes(q) ||
+                  (n.content || '').toLowerCase().includes(q) ||
+                  (n.labels || []).some(l => l.toLowerCase().includes(q));
+    n._dim = !match;
+  });
+});
+
+// 节点点击
+canvas.addEventListener('nodeclick', (e) => {
+  const node = e.detail;
+  if (node?.id) {
+    // 在记忆列表中高亮
+    document.querySelectorAll('.memory-card').forEach(c => c.classList.remove('active'));
+    const card = document.querySelector(`.memory-card[data-id="${node.id}"]`);
+    if (card) {
+      card.classList.add('active');
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+});
+
+// 按钮
+document.getElementById('btn-refresh').addEventListener('click', () => {
+  loadGraph(); loadStats(); loadMemories();
+});
+document.getElementById('btn-reset').addEventListener('click', () => {
+  graph.camera = { x: 0, y: 0, z: 800, rotX: 0.3, rotY: 0 };
+  graph.selected = null;
+});
+
+// 添加记忆
+const overlay = document.getElementById('overlay');
+const addPanel = document.getElementById('add-panel');
+document.getElementById('btn-add').addEventListener('click', () => {
+  overlay.style.display = 'block';
+  addPanel.style.display = 'block';
+});
+document.getElementById('add-cancel').addEventListener('click', () => {
+  overlay.style.display = 'none';
+  addPanel.style.display = 'none';
+});
+document.getElementById('add-importance').addEventListener('input', (e) => {
+  document.getElementById('add-imp-val').textContent = e.target.value;
+});
+document.getElementById('add-confirm').addEventListener('click', async () => {
+  const content = document.getElementById('add-content').value.trim();
+  if (!content) return;
+  await api('/api/memory/add', {
+    method: 'POST',
+    body: {
+      content,
+      memory_type: document.getElementById('add-type').value,
+      importance: parseFloat(document.getElementById('add-importance').value)
+    }
+  });
+  overlay.style.display = 'none';
+  addPanel.style.display = 'none';
+  document.getElementById('add-content').value = '';
+  loadGraph(); loadStats(); loadMemories();
+});
+
+// 初始化
+loadGraph();
+loadStats();
+loadMemories();
+connectWS();
+
+// 定时刷新
+setInterval(() => { loadStats(); }, 30000);
+setInterval(() => { loadGraph(); loadMemories(); }, 60000);
+</script>
+</body>
+</html>

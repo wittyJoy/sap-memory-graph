@@ -1,0 +1,17 @@
+{
+  "name": "sap-memory-graph",
+  "version": "1.0.0",
+  "description": "知识图谱记忆 + 3D 记忆云海可视化 | Knowledge Graph Memory + 3D Memory Cloud Visualization",
+  "author": "community",
+  "systemPrompt": "",
+  "repository": "https://github.com/sap-memory-graph/sap-memory-graph",
+  "category": "Memory",
+  "icon": "fa-solid fa-brain",
+  "features": [
+    "Neo4j Knowledge Graph",
+    "3D Memory Cloud Visualization",
+    "Auto Memory Extraction",
+    "Memory Recall Injection",
+    "Entity Relationship Graph"
+  ]
+}
